@@ -1,11 +1,12 @@
 /**
  * 포트폴리오 Server Actions
- * Supabase를 통한 포트폴리오 및 보유 종목 CRUD
+ * PostgreSQL을 통한 포트폴리오 및 보유 종목 CRUD
  */
 
 'use server'
 
-import { createClient } from '@/shared/lib/supabase/server'
+import { query } from '@/shared/api/db'
+import { getCurrentUser } from '@/entities/user/api/authApi'
 import type {
     Portfolio,
     Holding,
@@ -20,41 +21,28 @@ import type {
  */
 export async function getOrCreatePortfolio(): Promise<PortfolioApiResponse<Portfolio>> {
     try {
-        const supabase = await createClient()
-
-        // 현재 로그인한 사용자 확인
-        const { data: { user }, error: userError } = await supabase.auth.getUser()
-        if (userError || !user) {
+        const user = await getCurrentUser()
+        if (!user) {
             return { success: false, error: '로그인이 필요합니다' }
         }
 
         // 기존 포트폴리오 조회
-        const { data: portfolio, error: selectError } = await supabase
-            .from('portfolios')
-            .select('*')
-            .eq('user_id', user.id)
-            .single()
+        const result = await query(
+            'SELECT * FROM portfolios WHERE user_id = $1',
+            [user.id]
+        )
 
-        if (portfolio) {
-            return { success: true, data: portfolio }
+        if (result.rows.length > 0) {
+            return { success: true, data: result.rows[0] }
         }
 
         // 포트폴리오가 없으면 생성
-        if (selectError?.code === 'PGRST116') { // no rows returned
-            const { data: newPortfolio, error: insertError } = await supabase
-                .from('portfolios')
-                .insert({ user_id: user.id, total_value: 0 })
-                .select()
-                .single()
+        const insertResult = await query(
+            'INSERT INTO portfolios (user_id, total_value) VALUES ($1, $2) RETURNING *',
+            [user.id, 0]
+        )
 
-            if (insertError) {
-                return { success: false, error: insertError.message }
-            }
-
-            return { success: true, data: newPortfolio }
-        }
-
-        return { success: false, error: selectError?.message || '알 수 없는 오류' }
+        return { success: true, data: insertResult.rows[0] }
     } catch (error) {
         return {
             success: false,
@@ -68,26 +56,17 @@ export async function getOrCreatePortfolio(): Promise<PortfolioApiResponse<Portf
  */
 export async function getHoldings(): Promise<PortfolioApiResponse<Holding[]>> {
     try {
-        const supabase = await createClient()
-
-        // 포트폴리오 조회 (없으면 생성)
         const portfolioResult = await getOrCreatePortfolio()
         if (!portfolioResult.success || !portfolioResult.data) {
             return { success: false, error: portfolioResult.error }
         }
 
-        // 보유 종목 조회
-        const { data: holdings, error } = await supabase
-            .from('holdings')
-            .select('*')
-            .eq('portfolio_id', portfolioResult.data.id)
-            .order('created_at', { ascending: false })
+        const result = await query(
+            'SELECT * FROM holdings WHERE portfolio_id = $1 ORDER BY created_at DESC',
+            [portfolioResult.data.id]
+        )
 
-        if (error) {
-            return { success: false, error: error.message }
-        }
-
-        return { success: true, data: holdings || [] }
+        return { success: true, data: result.rows || [] }
     } catch (error) {
         return {
             success: false,
@@ -103,66 +82,45 @@ export async function addHolding(
     request: CreateHoldingRequest
 ): Promise<PortfolioApiResponse<Holding>> {
     try {
-        const supabase = await createClient()
-
-        // 포트폴리오 조회
         const portfolioResult = await getOrCreatePortfolio()
         if (!portfolioResult.success || !portfolioResult.data) {
             return { success: false, error: portfolioResult.error }
         }
 
+        const portfolioId = portfolioResult.data.id
+
         // 이미 보유 중인 종목인지 확인
-        const { data: existing } = await supabase
-            .from('holdings')
-            .select('*')
-            .eq('portfolio_id', portfolioResult.data.id)
-            .eq('symbol', request.symbol)
-            .single()
+        const existingResult = await query(
+            'SELECT * FROM holdings WHERE portfolio_id = $1 AND symbol = $2',
+            [portfolioId, request.symbol]
+        )
+
+        const existing = existingResult.rows[0]
 
         if (existing) {
-            // 기존 종목이 있으면 평균 단가 계산 후 업데이트
             const totalQuantity = Number(existing.quantity) + request.quantity
             const totalCost =
                 Number(existing.quantity) * Number(existing.average_price) +
                 request.quantity * request.average_price
             const newAveragePrice = totalCost / totalQuantity
 
-            const { data: updated, error: updateError } = await supabase
-                .from('holdings')
-                .update({
-                    quantity: totalQuantity,
-                    average_price: newAveragePrice
-                })
-                .eq('id', existing.id)
-                .select()
-                .single()
+            const updateResult = await query(
+                'UPDATE holdings SET quantity = $1, average_price = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
+                [totalQuantity, newAveragePrice, existing.id]
+            )
 
-            if (updateError) {
-                return { success: false, error: updateError.message }
-            }
-
-            return { success: true, data: updated }
+            return { success: true, data: updateResult.rows[0] }
         }
 
         // 새 종목 추가
-        const { data: newHolding, error: insertError } = await supabase
-            .from('holdings')
-            .insert({
-                portfolio_id: portfolioResult.data.id,
-                symbol: request.symbol,
-                name: request.name,
-                market: request.market,
-                quantity: request.quantity,
-                average_price: request.average_price,
-            })
-            .select()
-            .single()
+        const insertResult = await query(
+            `INSERT INTO holdings (portfolio_id, symbol, name, market, quantity, average_price)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [portfolioId, request.symbol, request.name, request.market, request.quantity, request.average_price]
+        )
 
-        if (insertError) {
-            return { success: false, error: insertError.message }
-        }
-
-        return { success: true, data: newHolding }
+        return { success: true, data: insertResult.rows[0] }
     } catch (error) {
         return {
             success: false,
@@ -179,20 +137,24 @@ export async function updateHolding(
     request: UpdateHoldingRequest
 ): Promise<PortfolioApiResponse<Holding>> {
     try {
-        const supabase = await createClient()
-
-        const { data: holding, error } = await supabase
-            .from('holdings')
-            .update(request)
-            .eq('id', holdingId)
-            .select()
-            .single()
-
-        if (error) {
-            return { success: false, error: error.message }
+        const fields = Object.keys(request)
+        const values = Object.values(request)
+        
+        if (fields.length === 0) {
+            return { success: false, error: '수정할 데이터가 없습니다' }
         }
 
-        return { success: true, data: holding }
+        const setClause = fields.map((field, index) => `${field} = $${index + 2}`).join(', ')
+        const result = await query(
+            `UPDATE holdings SET ${setClause}, updated_at = NOW() WHERE id = $1 RETURNING *`,
+            [holdingId, ...values]
+        )
+
+        if (result.rows.length === 0) {
+            return { success: false, error: '종목을 찾을 수 없습니다' }
+        }
+
+        return { success: true, data: result.rows[0] }
     } catch (error) {
         return {
             success: false,
@@ -208,17 +170,7 @@ export async function deleteHolding(
     holdingId: string
 ): Promise<PortfolioApiResponse<void>> {
     try {
-        const supabase = await createClient()
-
-        const { error } = await supabase
-            .from('holdings')
-            .delete()
-            .eq('id', holdingId)
-
-        if (error) {
-            return { success: false, error: error.message }
-        }
-
+        await query('DELETE FROM holdings WHERE id = $1', [holdingId])
         return { success: true }
     } catch (error) {
         return {
@@ -236,16 +188,10 @@ export async function sellHolding(
     quantity: number
 ): Promise<PortfolioApiResponse<Holding | null>> {
     try {
-        const supabase = await createClient()
+        const result = await query('SELECT * FROM holdings WHERE id = $1', [holdingId])
+        const holding = result.rows[0]
 
-        // 현재 보유량 확인
-        const { data: holding, error: selectError } = await supabase
-            .from('holdings')
-            .select('*')
-            .eq('id', holdingId)
-            .single()
-
-        if (selectError || !holding) {
+        if (!holding) {
             return { success: false, error: '종목을 찾을 수 없습니다' }
         }
 
@@ -256,25 +202,17 @@ export async function sellHolding(
         }
 
         if (quantity === currentQuantity) {
-            // 전량 매도 = 삭제
             await deleteHolding(holdingId)
             return { success: true, data: null }
         }
 
-        // 일부 매도
         const newQuantity = currentQuantity - quantity
-        const { data: updated, error: updateError } = await supabase
-            .from('holdings')
-            .update({ quantity: newQuantity })
-            .eq('id', holdingId)
-            .select()
-            .single()
+        const updateResult = await query(
+            'UPDATE holdings SET quantity = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+            [newQuantity, holdingId]
+        )
 
-        if (updateError) {
-            return { success: false, error: updateError.message }
-        }
-
-        return { success: true, data: updated }
+        return { success: true, data: updateResult.rows[0] }
     } catch (error) {
         return {
             success: false,

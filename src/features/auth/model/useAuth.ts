@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '@/shared/api/supabase'
-import { signUp as apiSignUp, signIn as apiSignIn, signOut as apiSignOut } from '@/entities/user/api/authApi'
+import { signUp as apiSignUp, signIn as apiSignIn, signOut as apiSignOut, getCurrentUser } from '@/entities/user/api/authApi'
 import { User } from '@/shared/types'
 
 export function useAuth() {
@@ -11,41 +10,26 @@ export function useAuth() {
     const router = useRouter()
 
     useEffect(() => {
-        // 현재 세션 확인
+        // 로컬 스토리지 또는 쿠키에서 토큰 확인 및 사용자 정보 조회
         const checkUser = async () => {
             setIsLoading(true)
-            const { data: { session } } = await supabase.auth.getSession()
-            if (session?.user) {
-                // User 타입에 맞게 매핑 (필요 시)
-                setUser({
-                    id: session.user.id,
-                    email: session.user.email || '',
-                    name: session.user.user_metadata?.name || '',
-                    created_at: new Date(session.user.created_at)
-                })
-            } else {
+            try {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null
+                if (token) {
+                    const currentUser = await getCurrentUser(token)
+                    setUser(currentUser)
+                } else {
+                    setUser(null)
+                }
+            } catch (err) {
+                console.error('사용자 확인 오류:', err)
                 setUser(null)
+            } finally {
+                setIsLoading(false)
             }
-            setIsLoading(false)
         }
 
         checkUser()
-
-        // 인증 상태 변경 감지
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-            if (session?.user) {
-                setUser({
-                    id: session.user.id,
-                    email: session.user.email || '',
-                    name: session.user.user_metadata?.name || '',
-                    created_at: new Date(session.user.created_at)
-                })
-            } else {
-                setUser(null)
-            }
-        })
-
-        return () => subscription.unsubscribe()
     }, [])
 
     /**
@@ -55,9 +39,12 @@ export function useAuth() {
         setIsLoading(true)
         setError(null)
         try {
-            await apiSignUp(email, password, name)
-            router.push('/')
-            return { success: true }
+            const result = await apiSignUp(email, password, name)
+            if (result.user) {
+                router.push('/auth/login')
+                return { success: true }
+            }
+            return { success: false, error: '회원가입에 실패했습니다.' }
         } catch (err: any) {
             const message = err.message || '회원가입 중 오류가 발생했습니다.'
             setError(message)
@@ -74,10 +61,16 @@ export function useAuth() {
         setIsLoading(true)
         setError(null)
         try {
-            await apiSignIn(email, password)
-            router.push('/')
-            router.refresh()
-            return { success: true }
+            const result = await apiSignIn(email, password)
+            if (result.session?.access_token) {
+                // 토큰 저장
+                localStorage.setItem('auth_token', result.session.access_token)
+                setUser(result.user)
+                router.push('/')
+                router.refresh()
+                return { success: true }
+            }
+            return { success: false, error: '로그인에 실패했습니다.' }
         } catch (err: any) {
             const message = err.message || '로그인 중 오류가 발생했습니다.'
             setError(message)
@@ -94,6 +87,7 @@ export function useAuth() {
         setIsLoading(true)
         try {
             await apiSignOut()
+            localStorage.removeItem('auth_token')
             setUser(null)
             router.push('/auth/login')
             router.refresh()

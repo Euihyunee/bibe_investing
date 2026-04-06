@@ -1,8 +1,9 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { fetchHoldings, addHolding, deleteHolding, HoldingInput } from '@/entities/portfolio/api/portfolioApi'
+import { getHoldings, addHolding, deleteHolding } from '@/features/portfolio/api/portfolioActions'
 import { getLatestPrices } from '@/entities/stock/api/stockApi'
+import { HoldingInput } from '@/features/portfolio/types'
 
 export function usePortfolio() {
     const [holdings, setHoldings] = useState<any[]>([])
@@ -15,10 +16,17 @@ export function usePortfolio() {
     const loadPortfolio = useCallback(async () => {
         setIsLoading(true)
         try {
-            const data = await fetchHoldings()
-            setHoldings(data || [])
+            // Server Action 호출
+            const result = await getHoldings()
+            
+            if (!result.success) {
+                throw new Error(result.error)
+            }
 
-            const symbols = Array.from(new Set((data || []).map((h: any) => h.symbol)))
+            const data = result.data || []
+            setHoldings(data)
+
+            const symbols = Array.from(new Set(data.map((h: any) => h.symbol)))
             const latestPrices = await getLatestPrices(symbols)
 
             // 메타데이터 추출 및 순수 가격 정보만 저장
@@ -54,7 +62,10 @@ export function usePortfolio() {
 
     const addItem = async (item: HoldingInput) => {
         try {
-            await addHolding(item)
+            const result = await addHolding(item)
+            if (!result.success) {
+                throw new Error(result.error)
+            }
             await loadPortfolio()
             return { success: true }
         } catch (err: any) {
@@ -64,7 +75,10 @@ export function usePortfolio() {
 
     const removeItem = async (id: string) => {
         try {
-            await deleteHolding(id)
+            const result = await deleteHolding(id)
+            if (!result.success) {
+                throw new Error(result.error)
+            }
             await loadPortfolio()
             return { success: true }
         } catch (err: any) {
@@ -113,7 +127,6 @@ export function usePortfolio() {
         })
 
         // 통합 계산 (KRW 기준)
-        // 주의: 현재 방식은 (현재 전체 가치 in KRW) - (전체 투자 원금 in KRW) 이므로 환율 변동 분이 수익률에 포함됨
         const combinedInvested = totalInvestedKRW + (totalInvestedUSD * exchangeRate)
         const combinedValue = totalValueKRW + (totalValueUSD * exchangeRate)
         const totalReturn = combinedValue - combinedInvested
@@ -129,7 +142,7 @@ export function usePortfolio() {
                 totalKRW: totalValueKRW,
                 exchangeRate,
                 isRealtime,
-                lastUpdatedAt // 추가
+                lastUpdatedAt
             }
         }
     }, [holdings, prices, isRealtime, lastUpdatedAt])
@@ -140,7 +153,7 @@ export function usePortfolio() {
         error,
         summary,
         isRealtime,
-        lastUpdatedAt, // 추가
+        lastUpdatedAt,
         addItem,
         removeItem,
         refresh: loadPortfolio
